@@ -85,9 +85,9 @@ def _get_employee_numbers(employees: list[str]) -> list[str]:
     employee_rows = frappe.get_all(
         "Employee",
         filters={"name": ["in", ordered_employees]},
-        fields=["name", "employee_number"],
+        fields=["name", "attendance_device_id"],
     )
-    employee_map = {row.name: (row.employee_number or row.name) for row in employee_rows}
+    employee_map = {row.name: (row.attendance_device_id or row.name) for row in employee_rows}
 
     return [employee_map.get(employee, employee) for employee in ordered_employees]
 
@@ -171,7 +171,7 @@ def _create_or_update_attendance(record: dict) -> dict:
 
 
 def _get_employee_by_number(employee_number: str) -> str | None:
-    employee = frappe.db.get_value("Employee", {"employee_number": employee_number}, "name")
+    employee = frappe.db.get_value("Employee", {"attendance_device_id": employee_number}, "name")
     if employee:
         return employee
 
