@@ -161,6 +161,7 @@ def _create_or_update_attendance(record: dict) -> dict:
     attendance.flags.ignore_permissions = True
     if status == "created":
         attendance.insert()
+        attendance.submit()
     else:
         attendance.save()
 
