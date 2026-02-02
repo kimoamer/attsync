@@ -3,12 +3,12 @@ from frappe.utils import get_datetime, get_time
 
 
 @frappe.whitelist(methods=["GET"])
-def get_sync_attendance_employees(payroll_entry: str | None = None) -> dict:
-    employee_rows = _get_payroll_entry_employees(payroll_entry)
+def get_sync_attendance_employees() -> dict:
+    employee_rows = _get_payroll_entry_employees()
     if not employee_rows:
         return {"employeeNumbers": [], "dateRanges": []}
 
-    selected_parent = payroll_entry or employee_rows[0].parent
+    selected_parent = employee_rows[0].parent
     filtered_rows = [row for row in employee_rows if row.parent == selected_parent]
     employee_numbers = _get_employee_numbers([row.employee for row in filtered_rows])
 
@@ -42,17 +42,13 @@ def sync_attendance_records(data: dict | str | None = None) -> dict:
     }
 
 
-def _get_payroll_entry_employees(payroll_entry: str | None) -> list:
-    payroll_entries = []
-    if payroll_entry:
-        payroll_entries = [payroll_entry]
-    else:
-        payroll_entries = frappe.db.get_all(
-            "Payroll Entry",
-            filters={"sync_attendance": 1, "synced": 0},
-            pluck="name",
-            order_by="posting_date asc",
-        )
+def _get_payroll_entry_employees() -> list:
+    payroll_entries = frappe.db.get_all(
+        "Payroll Entry",
+        filters={"docstatus": 0, "sync_attendance": 1, "synced": 0},
+        pluck="name",
+        order_by="posting_date asc",
+    )
 
     if not payroll_entries:
         return []

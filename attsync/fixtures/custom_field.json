@@ -29,6 +29,7 @@
     "label": "Synced",
     "insert_after": "sync_attendance",
     "default": "0",
+    "read_only": 1,
     "module": "Attsync"
   },
   {
