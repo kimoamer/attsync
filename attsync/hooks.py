@@ -85,6 +85,12 @@ app_license = "mit"
 # before_install = "attsync.install.before_install"
 # after_install = "attsync.install.after_install"
 
+# Fixtures
+# --------
+fixtures = [
+	{"dt": "Custom Field", "filters": [["module", "in", ["Attsync"]]]},
+]
+
 # Uninstallation
 # ------------
 

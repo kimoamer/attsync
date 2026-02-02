@@ -1,0 +1,55 @@
+[
+  {
+    "doctype": "Custom Field",
+    "name": "Shift Type-shift_id",
+    "dt": "Shift Type",
+    "fieldname": "shift_id",
+    "fieldtype": "Int",
+    "label": "Shift ID",
+    "insert_after": "end_time",
+    "module": "Attsync"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Payroll Entry-sync_attendance",
+    "dt": "Payroll Entry",
+    "fieldname": "sync_attendance",
+    "fieldtype": "Check",
+    "label": "Sync Attendance",
+    "insert_after": "company",
+    "default": "0",
+    "module": "Attsync"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Payroll Entry-synced",
+    "dt": "Payroll Entry",
+    "fieldname": "synced",
+    "fieldtype": "Check",
+    "label": "Synced",
+    "insert_after": "sync_attendance",
+    "default": "0",
+    "module": "Attsync"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Attendance-exception",
+    "dt": "Attendance",
+    "fieldname": "exception",
+    "fieldtype": "Data",
+    "label": "Exception",
+    "insert_after": "status",
+    "module": "Attsync"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Attendance-overtime_in_minutes",
+    "dt": "Attendance",
+    "fieldname": "overtime_in_minutes",
+    "fieldtype": "Int",
+    "label": "Overtime in Minutes",
+    "insert_after": "exception",
+    "default": "0",
+    "module": "Attsync"
+  }
+]
