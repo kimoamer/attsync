@@ -6,7 +6,8 @@ from frappe.utils import get_datetime, get_time
 def get_sync_attendance_employees() -> dict:
     employee_rows = _get_payroll_entry_employees()
     if not employee_rows:
-        return {"employeeNumbers": [], "dateRanges": []}
+        frappe.response.update({"employeeNumbers": [], "dateRanges": []})
+        return None
 
     selected_parent = employee_rows[0].parent
     filtered_rows = [row for row in employee_rows if row.parent == selected_parent]
@@ -14,10 +15,13 @@ def get_sync_attendance_employees() -> dict:
 
     _mark_payroll_entry_synced(selected_parent)
 
-    return {
-        "employeeNumbers": employee_numbers,
-        "dateRanges": _get_attendance_date_range(selected_parent),
-    }
+    frappe.response.update(
+        {
+            "employeeNumbers": employee_numbers,
+            "dateRanges": _get_attendance_date_range(selected_parent),
+        }
+    )
+    return None
 
 
 @frappe.whitelist(methods=["POST"])
