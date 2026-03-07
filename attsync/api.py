@@ -1,5 +1,7 @@
 import frappe
-from frappe.utils import get_datetime, get_time
+from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
+from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday as is_holiday_in_list
+from frappe.utils import get_datetime, get_time, getdate
 
 
 @frappe.whitelist(methods=["GET"])
@@ -149,8 +151,9 @@ def _create_or_update_attendance(record: dict) -> dict:
         attendance.attendance_date = attendance_date
         status = "created"
 
-    _set_if_field(attendance, "status",  _derive_status(record))
-    _set_if_field(attendance, "shift", _get_shift_type(record))
+    shift_type = _get_shift_type(record)
+    _set_if_field(attendance, "status", _derive_status(record, employee, shift_type))
+    _set_if_field(attendance, "shift", shift_type)
     _set_if_field(attendance, "in_time", _get_datetime_value(record.get("clockIn")))
     _set_if_field(attendance, "out_time", _get_datetime_value(record.get("clockOut")))
     _set_if_field(attendance, "late_entry_in_minutes", record.get("lateMinutes"))
@@ -269,16 +272,55 @@ def _get_shift_type(record: dict) -> str | None:
     return record.get("shiftName")
 
 
-def _derive_status(record: dict) -> str:
+def _derive_status(record: dict, employee: str | None, shift_type: str | None) -> str:
     exception = record.get("exception")
     if isinstance(exception, str) and "leave" in exception.lower():
         return "On Leave"
 
+    attendance_date = record.get("workDate")
     clock_in = record.get("clockIn")
     clock_out = record.get("clockOut")
+    if (
+        employee
+        and attendance_date
+        and _is_holiday_for_employee(employee, attendance_date, shift_type)
+        and not clock_in
+        and not clock_out
+        and not exception
+    ):
+        return _get_holiday_status()
+
     if not clock_in and not clock_out and not exception:
         return "Absent"
 
+    return "Present"
+
+
+def _is_holiday_for_employee(employee: str, attendance_date, shift_type: str | None) -> bool:
+    date_value = getdate(attendance_date)
+    holiday_lists = set()
+    try:
+        employee_list = get_holiday_list_for_employee(employee, raise_exception=False)
+    except TypeError:
+        employee_list = get_holiday_list_for_employee(employee, False)
+
+    if employee_list:
+        holiday_lists.add(employee_list)
+
+    if shift_type and frappe.get_meta("Shift Type").has_field("holiday_list"):
+        shift_list = frappe.db.get_value("Shift Type", shift_type, "holiday_list")
+        if shift_list:
+            holiday_lists.add(shift_list)
+
+    return any(is_holiday_in_list(holiday_list, date_value) for holiday_list in holiday_lists)
+
+
+def _get_holiday_status() -> str:
+    status_field = frappe.get_meta("Attendance").get_field("status")
+    if status_field and status_field.options:
+        options = [option.strip() for option in status_field.options.split("\n") if option.strip()]
+        if "Holiday" in options:
+            return "Holiday"
     return "Present"
 
 
