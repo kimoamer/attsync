@@ -142,23 +142,41 @@ def _create_or_update_attendance(record: dict) -> dict:
         "Attendance",
         {"employee": employee, "attendance_date": attendance_date},
     )
-    if existing_attendance:
-        attendance = frappe.get_doc("Attendance", existing_attendance)
-        status = "updated"
-    else:
+    
+    shift_type = _get_shift_type(record)
+    clock_in = record.get("clockIn")
+    clock_out = record.get("clockOut")
+    exception = record.get("exception")
+    
+    if not existing_attendance:
+        if (
+            _is_holiday_for_employee(employee, attendance_date, shift_type)
+            and not clock_in
+            and not clock_out
+            and not exception
+        ):
+            return {
+                "status": "skipped",
+                "reason": "Holiday with no check-in/out",
+                "employee": employee,
+                "recordId": record.get("recordId"),
+            }
+        
         attendance = frappe.new_doc("Attendance")
         attendance.employee = employee
         attendance.attendance_date = attendance_date
         status = "created"
+    else:
+        attendance = frappe.get_doc("Attendance", existing_attendance)
+        status = "updated"
 
-    shift_type = _get_shift_type(record)
     _set_if_field(attendance, "status", _derive_status(record, employee, shift_type))
     _set_if_field(attendance, "shift", shift_type)
-    _set_if_field(attendance, "in_time", _get_datetime_value(record.get("clockIn")))
-    _set_if_field(attendance, "out_time", _get_datetime_value(record.get("clockOut")))
+    _set_if_field(attendance, "in_time", _get_datetime_value(clock_in))
+    _set_if_field(attendance, "out_time", _get_datetime_value(clock_out))
     _set_if_field(attendance, "late_entry_in_minutes", record.get("lateMinutes"))
     _set_if_field(attendance, "early_exit_in_minutes", record.get("earlyMinutes"))
-    _set_if_field(attendance, "exception", record.get("exception"))
+    _set_if_field(attendance, "exception", exception)
     _set_if_field(attendance, "overtime_in_minutes", _get_overtime_minutes(record))
 
     attendance.flags.ignore_permissions = True
