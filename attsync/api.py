@@ -142,12 +142,12 @@ def _create_or_update_attendance(record: dict) -> dict:
         "Attendance",
         {"employee": employee, "attendance_date": attendance_date},
     )
-    
+
     shift_type = _get_shift_type(record)
     clock_in = record.get("clockIn")
     clock_out = record.get("clockOut")
     exception = record.get("exception")
-    
+
     if not existing_attendance:
         if (
             _is_holiday_for_employee(employee, attendance_date, shift_type)
@@ -161,13 +161,25 @@ def _create_or_update_attendance(record: dict) -> dict:
                 "employee": employee,
                 "recordId": record.get("recordId"),
             }
-        
+
         attendance = frappe.new_doc("Attendance")
         attendance.employee = employee
         attendance.attendance_date = attendance_date
         status = "created"
     else:
         attendance = frappe.get_doc("Attendance", existing_attendance)
+        existing_status = (attendance.status or "").strip()
+
+        if existing_status != "Absent":
+            return {
+                "status": "skipped",
+                "reason": f"Existing attendance status is protected: {existing_status or 'Unknown'}",
+                "attendance": attendance.name,
+                "employee": employee,
+                "existingStatus": existing_status,
+                "recordId": record.get("recordId"),
+            }
+
         status = "updated"
 
     _set_if_field(attendance, "status", _derive_status(record, employee, shift_type))
