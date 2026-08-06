@@ -182,19 +182,60 @@ def _create_or_update_attendance(record: dict) -> dict:
 
         status = "updated"
 
-    _set_if_field(attendance, "status", _derive_status(record, employee, shift_type))
+    base_status = _derive_status(record, employee, shift_type)
+
+    _set_if_field(attendance, "status", base_status)
     _set_if_field(attendance, "shift", shift_type)
     _set_if_field(attendance, "in_time", _get_datetime_value(clock_in))
     _set_if_field(attendance, "out_time", _get_datetime_value(clock_out))
-    _set_if_field(attendance, "late_entry_in_minutes", record.get("lateMinutes"))
-    _set_if_field(attendance, "early_exit_in_minutes", record.get("earlyMinutes"))
+    _set_if_field(
+        attendance,
+        "late_entry_in_minutes",
+        record.get("lateMinutes"),
+    )
+    _set_if_field(
+        attendance,
+        "early_exit_in_minutes",
+        record.get("earlyMinutes"),
+    )
     _set_if_field(attendance, "exception", exception)
-    _set_if_field(attendance, "overtime_in_minutes", _get_overtime_minutes(record))
+    _set_if_field(
+        attendance,
+        "overtime_in_minutes",
+        _get_overtime_minutes(record),
+    )
+
+    integration_context = frappe._dict(
+        {
+            "employee": employee,
+            "attendance_date": attendance_date,
+            "shift_type": shift_type,
+            "base_status": base_status,
+            "late_entry": bool(record.get("lateMinutes")),
+            "early_exit": bool(record.get("earlyMinutes")),
+            "late_entry_in_minutes": record.get("lateMinutes") or 0,
+            "early_exit_in_minutes": record.get("earlyMinutes") or 0,
+            "record": record,
+        }
+    )
 
     attendance.flags.ignore_permissions = True
+
     if status == "created":
+        _run_attendance_integrations(
+            attendance,
+            integration_context,
+            "before_insert",
+        )
+
         attendance.insert()
         attendance.submit()
+
+        _run_attendance_integrations(
+            attendance,
+            integration_context,
+            "after_submit",
+        )
     else:
         attendance.save()
 
@@ -206,6 +247,17 @@ def _create_or_update_attendance(record: dict) -> dict:
         "employee": employee,
         "recordId": record.get("recordId"),
     }
+
+
+def _run_attendance_integrations(attendance, context, event):
+    methods = frappe.get_hooks("attsync_attendance_integration") or []
+
+    for method in methods:
+        frappe.get_attr(method)(
+            attendance=attendance,
+            context=context,
+            event=event,
+        )
 
 
 def _get_employee_by_number(employee_number: str) -> str | None:
