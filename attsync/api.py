@@ -237,6 +237,9 @@ def _create_or_update_attendance(record: dict) -> dict:
             "after_submit",
         )
     else:
+        if attendance.docstatus == 1:
+            attendance.flags.ignore_validate_update_after_submit = True
+
         attendance.save()
 
     _mark_employee_synced(employee)
