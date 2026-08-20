@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "employee",
+  "employee_name",
+  "attendance_device_id",
+  "include_in_sync",
+  "synced",
+  "failed",
+  "records_found",
+  "records_synced",
+  "last_synced_at",
+  "error_message"
+ ],
+ "fields": [
+  {"columns": 2, "fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "label": "Employee", "options": "Employee", "reqd": 1},
+  {"columns": 2, "fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
+  {"columns": 2, "fieldname": "attendance_device_id", "fieldtype": "Data", "in_list_view": 1, "label": "Attendance Device ID", "read_only": 1, "reqd": 1},
+  {"columns": 1, "default": "1", "fieldname": "include_in_sync", "fieldtype": "Check", "in_list_view": 1, "label": "Include in Sync"},
+  {"columns": 1, "default": "0", "fieldname": "synced", "fieldtype": "Check", "in_list_view": 1, "label": "Synced", "read_only": 1},
+  {"columns": 1, "default": "0", "fieldname": "failed", "fieldtype": "Check", "in_list_view": 1, "label": "Failed", "read_only": 1},
+  {"fieldname": "records_found", "fieldtype": "Int", "label": "Records Found", "read_only": 1},
+  {"fieldname": "records_synced", "fieldtype": "Int", "label": "Records Synced", "read_only": 1},
+  {"fieldname": "last_synced_at", "fieldtype": "Datetime", "label": "Last Synced At", "read_only": 1},
+  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message", "read_only": 1}
+ ],
+ "istable": 1,
+ "links": [],
+ "module": "Attsync",
+ "name": "Attendance Sync Employee",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
