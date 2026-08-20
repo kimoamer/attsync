@@ -11,29 +11,6 @@
   },
   {
     "doctype": "Custom Field",
-    "name": "Payroll Entry-sync_attendance",
-    "dt": "Payroll Entry",
-    "fieldname": "sync_attendance",
-    "fieldtype": "Check",
-    "label": "Sync Attendance",
-    "insert_after": "company",
-    "default": "0",
-    "module": "Attsync"
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Payroll Entry-synced",
-    "dt": "Payroll Entry",
-    "fieldname": "synced",
-    "fieldtype": "Check",
-    "label": "Synced",
-    "insert_after": "sync_attendance",
-    "default": "0",
-    "read_only": 1,
-    "module": "Attsync"
-  },
-  {
-    "doctype": "Custom Field",
     "name": "Attendance-exception",
     "dt": "Attendance",
     "fieldname": "exception",
@@ -51,6 +28,18 @@
     "label": "Overtime in Minutes",
     "insert_after": "exception",
     "default": "0",
+    "module": "Attsync"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Attendance-atsync_record_id",
+    "dt": "Attendance",
+    "fieldname": "atsync_record_id",
+    "fieldtype": "Data",
+    "label": "Attsync Record ID",
+    "insert_after": "overtime_in_minutes",
+    "hidden": 1,
+    "read_only": 1,
     "module": "Attsync"
   }
 ]
