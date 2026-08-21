@@ -92,13 +92,13 @@ fixtures = [
 ]
 
 # Uninstallation
-# ------------
+# --------------
 
 # before_uninstall = "attsync.uninstall.before_uninstall"
 # after_uninstall = "attsync.uninstall.after_uninstall"
 
 # Integration Setup
-# ------------------
+# -----------------
 # To set up dependencies/integrations with other apps
 # Name of the app being installed is passed as an argument
 
@@ -217,7 +217,7 @@ fixtures = [
 # 	{
 # 		"doctype": "{doctype_1}",
 # 		"filter_by": "{filter_by}",
-# 		"redact_fields": ["{field_1}", "{field_2}"],
+# 		"redact_fields": ["{field_1}"],
 # 		"partial": 1,
 # 	},
 # 	{
@@ -244,7 +244,7 @@ fixtures = [
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
 
-# default_log_clearing_doctypes = {
-# 	"Logging DocType Name": 30  # days to retain logs
-# }
-
+# Attendance Sync Request is operational log data, not permanent audit history.
+default_log_clearing_doctypes = {
+	"Attendance Sync Request": 30,
+}

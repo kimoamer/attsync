@@ -1,26 +1,45 @@
 import frappe
 from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday as is_holiday_in_list
-from frappe.utils import get_datetime, get_time, getdate
+from frappe.utils import get_datetime, get_time, getdate, now_datetime
+
+REQUEST_DOCTYPE = "Attendance Sync Request"
+REQUEST_EMPLOYEE_DOCTYPE = "Attendance Sync Employee"
+REQUEST_BATCH_DOCTYPE = "Attendance Sync Batch"
 
 
 @frappe.whitelist(methods=["GET"])
 def get_sync_attendance_employees() -> dict:
-    employee_rows = _get_payroll_entry_employees()
-    if not employee_rows:
+    sync_request = _claim_next_sync_request()
+    if not sync_request:
         frappe.response.update({"employeeNumbers": [], "dateRanges": []})
         return None
 
-    selected_parent = employee_rows[0].parent
-    filtered_rows = [row for row in employee_rows if row.parent == selected_parent]
-    employee_numbers = _get_employee_numbers([row.employee for row in filtered_rows])
+    employee_rows = _get_request_employee_rows(sync_request.name)
+    employee_numbers = [row.attendance_device_id for row in employee_rows if row.attendance_device_id]
 
-    _mark_payroll_entry_synced(selected_parent)
+    if not employee_numbers:
+        frappe.db.set_value(
+            REQUEST_DOCTYPE,
+            sync_request.name,
+            {"status": "Failed", "last_error": "No selected employees with attendance device IDs."},
+            update_modified=False,
+        )
+        frappe.local.flags.commit = True
+        frappe.response.update({"employeeNumbers": [], "dateRanges": []})
+        return None
+
+    from_date = str(getdate(sync_request.from_date))
+    to_date = str(getdate(sync_request.to_date))
 
     frappe.response.update(
         {
+            "requestId": sync_request.name,
+            "company": sync_request.company,
             "employeeNumbers": employee_numbers,
-            "dateRanges": _get_attendance_date_range(selected_parent),
+            "fromDate": from_date,
+            "toDate": to_date,
+            "dateRanges": [from_date, to_date],
         }
     )
     return None
@@ -29,42 +48,168 @@ def get_sync_attendance_employees() -> dict:
 @frappe.whitelist(methods=["POST"])
 def sync_attendance_records(data: dict | str | None = None) -> dict:
     payload = _get_payload(data)
-    records = payload.get("records") or []
+    request_id = payload.get("requestId") or payload.get("request_id")
 
+    if payload.get("finalize"):
+        return _finalize_sync_request(payload, request_id)
+
+    records = payload.get("records") or []
     if not records:
         return {"batchId": payload.get("batchId"), "results": []}
+
+    if not request_id:
+        job = frappe.enqueue(
+            _process_attendance_records,
+            queue="long",
+            timeout=6000,
+            payload=payload,
+        )
+        return {
+            "batchId": payload.get("batchId"),
+            "queued": True,
+            "jobId": getattr(job, "id", None) or getattr(job, "get_id", lambda: None)(),
+        }
+
+    _validate_request_for_upload(request_id)
+    batch_id = payload.get("batchId")
+    if not batch_id:
+        frappe.throw("batchId is required when requestId is supplied")
+
+    existing_batch = frappe.db.get_value(
+        REQUEST_BATCH_DOCTYPE,
+        {"parent": request_id, "parenttype": REQUEST_DOCTYPE, "batch_id": batch_id},
+        ["name", "status", "job_id"],
+        as_dict=True,
+    )
+    if existing_batch:
+        return {
+            "batchId": batch_id,
+            "queued": existing_batch.status in {"Queued", "Processing"},
+            "status": existing_batch.status,
+            "jobId": existing_batch.job_id,
+            "duplicate": True,
+        }
+
+    request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+    request_doc.status = "In Progress"
+    request_doc.last_sync_attempt = now_datetime()
+    batch_row = request_doc.append(
+        "batches",
+        {
+            "batch_id": batch_id,
+            "status": "Queued",
+            "records_received": len(records),
+        },
+    )
+    request_doc.flags.ignore_permissions = True
+    request_doc.save()
 
     job = frappe.enqueue(
         _process_attendance_records,
         queue="long",
         timeout=6000,
         payload=payload,
+        enqueue_after_commit=True,
+    )
+    job_id = getattr(job, "id", None) or getattr(job, "get_id", lambda: None)()
+    if job_id:
+        frappe.db.set_value(REQUEST_BATCH_DOCTYPE, batch_row.name, "job_id", job_id, update_modified=False)
+
+    return {"batchId": batch_id, "queued": True, "jobId": job_id}
+
+
+def _claim_next_sync_request():
+    rows = frappe.db.sql(
+        f"""
+        select name
+        from `tab{REQUEST_DOCTYPE}`
+        where status = 'Ready'
+        order by creation asc
+        limit 1
+        for update
+        """,
+        as_dict=True,
+    )
+    if not rows:
+        return None
+
+    request_doc = frappe.get_doc(REQUEST_DOCTYPE, rows[0].name)
+    request_doc.status = "In Progress"
+    request_doc.claimed_at = now_datetime()
+    request_doc.last_sync_attempt = now_datetime()
+    request_doc.last_error = None
+    request_doc.flags.ignore_permissions = True
+    request_doc.save()
+
+    frappe.local.flags.commit = True
+    return request_doc
+
+
+def _get_request_employee_rows(request_id: str) -> list:
+    return frappe.get_all(
+        REQUEST_EMPLOYEE_DOCTYPE,
+        filters={
+            "parent": request_id,
+            "parenttype": REQUEST_DOCTYPE,
+            "parentfield": "employees",
+            "include_in_sync": 1,
+        },
+        fields=["name", "employee", "employee_name", "attendance_device_id"],
+        order_by="idx asc",
     )
 
-    return {
-        "batchId": payload.get("batchId"),
-        "queued": True,
-        "jobId": getattr(job, "id", None) or getattr(job, "get_id", lambda: None)(),
+
+def _validate_request_for_upload(request_id: str) -> None:
+    if not frappe.db.exists(REQUEST_DOCTYPE, request_id):
+        frappe.throw(f"Attendance Sync Request {request_id} does not exist")
+
+    status = frappe.db.get_value(REQUEST_DOCTYPE, request_id, "status")
+    if status not in {"Ready", "In Progress"}:
+        frappe.throw(f"Attendance Sync Request {request_id} is not open for upload (status: {status})")
+
+
+def _finalize_sync_request(payload: dict, request_id: str | None) -> dict:
+    if not request_id:
+        return {"finalized": False, "reason": "requestId is required"}
+
+    if not frappe.db.exists(REQUEST_DOCTYPE, request_id):
+        frappe.throw(f"Attendance Sync Request {request_id} does not exist")
+
+    request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+
+    if payload.get("dryRun"):
+        if request_doc.batches:
+            frappe.throw("Cannot reset a dry-run request after attendance batches have been queued")
+        request_doc.status = "Ready"
+        request_doc.claimed_at = None
+        request_doc.last_sync_attempt = now_datetime()
+        request_doc.finalize_received = 0
+        request_doc.expected_batches = 0
+        request_doc.last_error = None
+        request_doc.flags.ignore_permissions = True
+        request_doc.save()
+        return {"requestId": request_id, "finalized": True, "status": request_doc.status, "dryRun": True}
+
+    request_doc.finalize_received = 1
+    request_doc.expected_batches = int(payload.get("expectedBatches") or 0)
+    request_doc.last_sync_attempt = now_datetime()
+
+    failed_numbers = {
+        str(value)
+        for value in (payload.get("failedEmployees") or [])
+        if value not in (None, "")
     }
+    for employee_number in failed_numbers:
+        _mark_request_employee_failed(
+            request_id,
+            employee_number,
+            "Attendance query or upload failed on the sync client.",
+        )
 
-
-def _get_payroll_entry_employees() -> list:
-    payroll_entries = frappe.db.get_all(
-        "Payroll Entry",
-        filters={"docstatus": 0, "sync_attendance": 1, "synced": 0},
-        pluck="name",
-        order_by="posting_date asc",
-    )
-
-    if not payroll_entries:
-        return []
-
-    return frappe.db.get_all(
-        "Payroll Employee Detail",
-        filters={"parent": ["in", payroll_entries]},
-        fields=["employee", "parent"],
-        order_by="parent asc, idx asc",
-    )
+    request_doc.flags.ignore_permissions = True
+    request_doc.save()
+    status = _refresh_request_status(request_id)
+    return {"requestId": request_id, "finalized": True, "status": status}
 
 
 def _get_payload(data: dict | str | None) -> dict:
@@ -83,50 +228,15 @@ def _get_payload(data: dict | str | None) -> dict:
     return frappe.local.form_dict or {}
 
 
-def _get_employee_numbers(employees: list[str]) -> list[str]:
-    ordered_employees = _dedupe_preserve_order([emp for emp in employees if emp])
-    if not ordered_employees:
-        return []
-
-    employee_rows = frappe.get_all(
-        "Employee",
-        filters={"name": ["in", ordered_employees]},
-        fields=["name", "attendance_device_id"],
-    )
-    employee_map = {row.name: (row.attendance_device_id or row.name) for row in employee_rows}
-
-    return [employee_map.get(employee, employee) for employee in ordered_employees]
-
-
-def _get_attendance_date_range(payroll_entry: str) -> list:
-    if not payroll_entry:
-        return []
-
-    date_fields = frappe.db.get_value(
-        "Payroll Entry",
-        payroll_entry,
-        ["attendance_start_date", "attendance_end_date"],
-        as_dict=True,
-    )
-    if not date_fields:
-        return []
-
-    start_date = date_fields.attendance_start_date or date_fields.start_date
-    end_date = date_fields.attendance_end_date or date_fields.end_date
-    if not (start_date and end_date):
-        return []
-
-    return [start_date, end_date]
-
-
-def _create_or_update_attendance(record: dict) -> dict:
+def _create_or_update_attendance(record: dict, request_id: str | None = None) -> dict:
     employee_number = record.get("employeeNo")
     attendance_date = record.get("workDate")
+    record_id = record.get("recordId")
     if not employee_number or not attendance_date:
         return {
             "status": "skipped",
             "reason": "Missing employeeNo or workDate",
-            "recordId": record.get("recordId"),
+            "recordId": record_id,
         }
 
     employee = _get_employee_by_number(employee_number)
@@ -135,7 +245,7 @@ def _create_or_update_attendance(record: dict) -> dict:
             "status": "skipped",
             "reason": "Employee not found",
             "employeeNo": employee_number,
-            "recordId": record.get("recordId"),
+            "recordId": record_id,
         }
 
     existing_attendance = frappe.db.exists(
@@ -159,7 +269,7 @@ def _create_or_update_attendance(record: dict) -> dict:
                 "status": "skipped",
                 "reason": "Holiday with no check-in/out",
                 "employee": employee,
-                "recordId": record.get("recordId"),
+                "recordId": record_id,
             }
 
         attendance = frappe.new_doc("Attendance")
@@ -169,15 +279,19 @@ def _create_or_update_attendance(record: dict) -> dict:
     else:
         attendance = frappe.get_doc("Attendance", existing_attendance)
         existing_status = (attendance.status or "").strip()
+        existing_record_id = None
+        if attendance.meta.has_field("atsync_record_id"):
+            existing_record_id = attendance.get("atsync_record_id")
 
-        if existing_status != "Absent":
+        owned_by_attsync = bool(record_id and existing_record_id and existing_record_id == record_id)
+        if existing_status != "Absent" and not owned_by_attsync:
             return {
                 "status": "skipped",
                 "reason": f"Existing attendance status is protected: {existing_status or 'Unknown'}",
                 "attendance": attendance.name,
                 "employee": employee,
                 "existingStatus": existing_status,
-                "recordId": record.get("recordId"),
+                "recordId": record_id,
             }
 
         status = "updated"
@@ -188,22 +302,11 @@ def _create_or_update_attendance(record: dict) -> dict:
     _set_if_field(attendance, "shift", shift_type)
     _set_if_field(attendance, "in_time", _get_datetime_value(clock_in))
     _set_if_field(attendance, "out_time", _get_datetime_value(clock_out))
-    _set_if_field(
-        attendance,
-        "late_entry_in_minutes",
-        record.get("lateMinutes"),
-    )
-    _set_if_field(
-        attendance,
-        "early_exit_in_minutes",
-        record.get("earlyMinutes"),
-    )
+    _set_if_field(attendance, "late_entry_in_minutes", record.get("lateMinutes"))
+    _set_if_field(attendance, "early_exit_in_minutes", record.get("earlyMinutes"))
     _set_if_field(attendance, "exception", exception)
-    _set_if_field(
-        attendance,
-        "overtime_in_minutes",
-        _get_overtime_minutes(record),
-    )
+    _set_if_field(attendance, "overtime_in_minutes", _get_overtime_minutes(record))
+    _set_if_field(attendance, "atsync_record_id", record_id)
 
     integration_context = frappe._dict(
         {
@@ -215,6 +318,7 @@ def _create_or_update_attendance(record: dict) -> dict:
             "early_exit": bool(record.get("earlyMinutes")),
             "late_entry_in_minutes": record.get("lateMinutes") or 0,
             "early_exit_in_minutes": record.get("earlyMinutes") or 0,
+            "request_id": request_id,
             "record": record,
         }
     )
@@ -222,101 +326,255 @@ def _create_or_update_attendance(record: dict) -> dict:
     attendance.flags.ignore_permissions = True
 
     if status == "created":
-        _run_attendance_integrations(
-            attendance,
-            integration_context,
-            "before_insert",
-        )
-
+        _run_attendance_integrations(attendance, integration_context, "before_insert")
         attendance.insert()
         attendance.submit()
-
-        _run_attendance_integrations(
-            attendance,
-            integration_context,
-            "after_submit",
-        )
+        _run_attendance_integrations(attendance, integration_context, "after_submit")
     else:
         if attendance.docstatus == 1:
             attendance.flags.ignore_validate_update_after_submit = True
-
         attendance.save()
-
-    _mark_employee_synced(employee)
 
     return {
         "status": status,
         "attendance": attendance.name,
         "employee": employee,
-        "recordId": record.get("recordId"),
+        "employeeNo": employee_number,
+        "recordId": record_id,
     }
 
 
 def _run_attendance_integrations(attendance, context, event):
     methods = frappe.get_hooks("attsync_attendance_integration") or []
-
     for method in methods:
-        frappe.get_attr(method)(
-            attendance=attendance,
-            context=context,
-            event=event,
-        )
+        frappe.get_attr(method)(attendance=attendance, context=context, event=event)
 
 
 def _get_employee_by_number(employee_number: str) -> str | None:
     employee = frappe.db.get_value("Employee", {"attendance_device_id": employee_number}, "name")
     if employee:
         return employee
-
     return frappe.db.get_value("Employee", {"name": employee_number}, "name")
 
 
 def _process_attendance_records(payload: dict) -> dict:
     records = payload.get("records") or []
+    request_id = payload.get("requestId") or payload.get("request_id")
+    batch_id = payload.get("batchId")
+
+    if request_id and batch_id:
+        _set_batch_status(request_id, batch_id, "Processing")
+        frappe.db.commit()
+
     results = []
-    for record in records:
-        results.append(_create_or_update_attendance(record))
+    try:
+        for record in records:
+            results.append(_create_or_update_attendance(record, request_id=request_id))
 
-    return {
-        "batchId": payload.get("batchId"),
-        "results": results,
-    }
+        if request_id and batch_id:
+            _record_batch_success(request_id, batch_id, records, results)
+            _refresh_request_status(request_id)
+
+        return {"batchId": batch_id, "results": results}
+    except Exception as exc:
+        frappe.db.rollback()
+        if request_id and batch_id:
+            failed_employee_numbers = [record.get("employeeNo") for record in records if record.get("employeeNo")]
+            _record_batch_failure(request_id, batch_id, failed_employee_numbers, str(exc))
+            _refresh_request_status(request_id)
+            frappe.db.commit()
+        raise
 
 
-def _mark_employee_synced(employee: str) -> None:
-    payroll_meta = frappe.get_meta("Payroll Entry")
-    if not payroll_meta.has_field("synced"):
-        return
-
-    parent_rows = frappe.db.get_all(
-        "Payroll Employee Detail",
-        filters={"employee": employee},
-        fields=["parent"],
+def _set_batch_status(request_id: str, batch_id: str, status: str) -> None:
+    batch_name = frappe.db.get_value(
+        REQUEST_BATCH_DOCTYPE,
+        {"parent": request_id, "parenttype": REQUEST_DOCTYPE, "batch_id": batch_id},
+        "name",
     )
-    parent_names = [row.parent for row in parent_rows if row.parent]
-    if not parent_names:
-        return
+    if batch_name:
+        frappe.db.set_value(REQUEST_BATCH_DOCTYPE, batch_name, "status", status, update_modified=False)
 
-    filters = {"name": ["in", list({name for name in parent_names})]}
-    if payroll_meta.has_field("sync_attendance"):
-        filters["sync_attendance"] = 1
-    filters["synced"] = 0
 
-    eligible_parents = frappe.db.get_all(
-        "Payroll Entry",
-        filters=filters,
-        pluck="name",
+def _record_batch_success(request_id: str, batch_id: str, records: list, results: list) -> None:
+    batch_name = frappe.db.get_value(
+        REQUEST_BATCH_DOCTYPE,
+        {"parent": request_id, "parenttype": REQUEST_DOCTYPE, "batch_id": batch_id},
+        "name",
     )
-    for payroll_entry in eligible_parents:
-        _mark_payroll_entry_synced(payroll_entry)
+    if not batch_name:
+        return
+
+    synced_count = 0
+    failed_count = 0
+    per_employee: dict[str, dict[str, int | str]] = {}
+
+    for record, result in zip(records, results, strict=False):
+        employee_number = str(record.get("employeeNo") or "")
+        if not employee_number:
+            continue
+
+        bucket = per_employee.setdefault(employee_number, {"found": 0, "synced": 0, "failed": 0, "error": ""})
+        bucket["found"] += 1
+        if _is_successful_record_result(result):
+            bucket["synced"] += 1
+            synced_count += 1
+        else:
+            bucket["failed"] += 1
+            failed_count += 1
+            bucket["error"] = result.get("reason") or "Attendance record was not applied."
+
+    for employee_number, counts in per_employee.items():
+        row_name = _get_request_employee_row_name(request_id, employee_number)
+        if not row_name:
+            continue
+
+        current = frappe.db.get_value(
+            REQUEST_EMPLOYEE_DOCTYPE,
+            row_name,
+            ["records_found", "records_synced"],
+            as_dict=True,
+        )
+        values = {
+            "records_found": int((current.records_found if current else 0) or 0) + int(counts["found"]),
+            "records_synced": int((current.records_synced if current else 0) or 0) + int(counts["synced"]),
+        }
+        if counts["failed"]:
+            values.update({"failed": 1, "error_message": counts["error"]})
+        frappe.db.set_value(REQUEST_EMPLOYEE_DOCTYPE, row_name, values, update_modified=False)
+
+    frappe.db.set_value(
+        REQUEST_BATCH_DOCTYPE,
+        batch_name,
+        {
+            "status": "Completed" if failed_count == 0 else "Failed",
+            "records_synced": synced_count,
+            "records_failed": failed_count,
+            "error_message": None if failed_count == 0 else "One or more attendance records were not applied.",
+        },
+        update_modified=False,
+    )
 
 
-def _mark_payroll_entry_synced(payroll_entry: str) -> None:
-    if not payroll_entry:
+def _record_batch_failure(request_id: str, batch_id: str, employee_numbers: list[str], error: str) -> None:
+    batch_name = frappe.db.get_value(
+        REQUEST_BATCH_DOCTYPE,
+        {"parent": request_id, "parenttype": REQUEST_DOCTYPE, "batch_id": batch_id},
+        "name",
+    )
+    if batch_name:
+        frappe.db.set_value(
+            REQUEST_BATCH_DOCTYPE,
+            batch_name,
+            {"status": "Failed", "error_message": error[:1000]},
+            update_modified=False,
+        )
+
+    for employee_number in set(employee_numbers):
+        _mark_request_employee_failed(request_id, employee_number, error)
+
+    frappe.db.set_value(REQUEST_DOCTYPE, request_id, "last_error", error[:1000], update_modified=False)
+
+
+def _is_successful_record_result(result: dict) -> bool:
+    if result.get("status") in {"created", "updated"}:
+        return True
+    return result.get("status") == "skipped" and result.get("reason") == "Holiday with no check-in/out"
+
+
+def _get_request_employee_row_name(request_id: str, employee_number: str) -> str | None:
+    return frappe.db.get_value(
+        REQUEST_EMPLOYEE_DOCTYPE,
+        {
+            "parent": request_id,
+            "parenttype": REQUEST_DOCTYPE,
+            "parentfield": "employees",
+            "attendance_device_id": employee_number,
+            "include_in_sync": 1,
+        },
+        "name",
+    )
+
+
+def _mark_request_employee_failed(request_id: str, employee_number: str, error: str) -> None:
+    row_name = _get_request_employee_row_name(request_id, str(employee_number))
+    if not row_name:
         return
-    if not frappe.get_meta("Payroll Entry").has_field("synced"):
-        return
-    frappe.db.set_value("Payroll Entry", payroll_entry, "synced", 1, update_modified=False)
+    frappe.db.set_value(
+        REQUEST_EMPLOYEE_DOCTYPE,
+        row_name,
+        {"failed": 1, "synced": 0, "error_message": (error or "Sync failed")[:1000]},
+        update_modified=False,
+    )
+
+
+def _refresh_request_status(request_id: str) -> str:
+    request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+    selected_rows = [row for row in request_doc.employees if row.include_in_sync]
+    batch_rows = list(request_doc.batches or [])
+
+    if not request_doc.finalize_received:
+        status = "In Progress"
+    else:
+        expected_batches = int(request_doc.expected_batches or 0)
+        active_batches = [row for row in batch_rows if row.status in {"Queued", "Processing"}]
+        if active_batches or len(batch_rows) < expected_batches:
+            status = "In Progress"
+        else:
+            now = now_datetime()
+            failed_rows = [row for row in selected_rows if row.failed]
+            for row in selected_rows:
+                if row.failed:
+                    if row.synced:
+                        frappe.db.set_value(REQUEST_EMPLOYEE_DOCTYPE, row.name, "synced", 0, update_modified=False)
+                    continue
+                frappe.db.set_value(
+                    REQUEST_EMPLOYEE_DOCTYPE,
+                    row.name,
+                    {"synced": 1, "last_synced_at": now, "error_message": None},
+                    update_modified=False,
+                )
+
+            if failed_rows and len(failed_rows) == len(selected_rows):
+                status = "Failed"
+            elif failed_rows:
+                status = "Partial"
+            else:
+                status = "Completed"
+
+    frappe.db.set_value(
+        REQUEST_DOCTYPE,
+        request_id,
+        {
+            "status": status,
+            "completed_at": now_datetime() if status in {"Completed", "Partial", "Failed"} else None,
+        },
+        update_modified=False,
+    )
+    _update_request_counts(request_id)
+    return status
+
+
+def _update_request_counts(request_id: str) -> None:
+    rows = frappe.get_all(
+        REQUEST_EMPLOYEE_DOCTYPE,
+        filters={"parent": request_id, "parenttype": REQUEST_DOCTYPE, "parentfield": "employees", "include_in_sync": 1},
+        fields=["synced", "failed"],
+    )
+    total = len(rows)
+    synced = sum(1 for row in rows if row.synced)
+    failed = sum(1 for row in rows if row.failed)
+    frappe.db.set_value(
+        REQUEST_DOCTYPE,
+        request_id,
+        {
+            "total_employees": total,
+            "synced_employees": synced,
+            "failed_employees": failed,
+            "pending_employees": max(0, total - synced - failed),
+        },
+        update_modified=False,
+    )
 
 
 def _set_if_field(doc, fieldname: str, value) -> None:
@@ -353,7 +611,6 @@ def _get_shift_type(record: dict) -> str | None:
         shift_name = frappe.db.get_value("Shift Type", {"shift_id": shift_id}, "name")
         if shift_name:
             return shift_name
-
     return record.get("shiftName")
 
 
@@ -377,7 +634,6 @@ def _derive_status(record: dict, employee: str | None, shift_type: str | None) -
 
     if not clock_in and not clock_out and not exception:
         return "Absent"
-
     return "Present"
 
 
@@ -407,14 +663,3 @@ def _get_holiday_status() -> str:
         if "Holiday" in options:
             return "Holiday"
     return "Present"
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen = set()
-    output = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        output.append(value)
-    return output

@@ -1,0 +1,24 @@
+{
+ "actions": [],
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": ["batch_id", "status", "records_received", "records_synced", "records_failed", "job_id", "error_message"],
+ "fields": [
+  {"columns": 3, "fieldname": "batch_id", "fieldtype": "Data", "in_list_view": 1, "label": "Batch ID", "read_only": 1, "reqd": 1},
+  {"columns": 2, "default": "Queued", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Queued\nProcessing\nCompleted\nFailed", "read_only": 1},
+  {"columns": 2, "fieldname": "records_received", "fieldtype": "Int", "in_list_view": 1, "label": "Records Received", "read_only": 1},
+  {"columns": 2, "fieldname": "records_synced", "fieldtype": "Int", "in_list_view": 1, "label": "Records Synced", "read_only": 1},
+  {"columns": 2, "fieldname": "records_failed", "fieldtype": "Int", "in_list_view": 1, "label": "Records Failed", "read_only": 1},
+  {"fieldname": "job_id", "fieldtype": "Data", "label": "Job ID", "read_only": 1},
+  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message", "read_only": 1}
+ ],
+ "istable": 1,
+ "links": [],
+ "module": "Attsync",
+ "name": "Attendance Sync Batch",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
