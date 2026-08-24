@@ -58,6 +58,21 @@ def sync_attendance_records(data: dict | str | None = None) -> dict:
         return {"batchId": payload.get("batchId"), "results": []}
 
     if not request_id:
+        open_requests = frappe.get_all(
+            REQUEST_DOCTYPE,
+            filters={"status": ["in", ["Ready", "In Progress"]]},
+            fields=["name", "status"],
+            order_by="creation asc",
+            limit_page_length=1,
+        )
+        if open_requests:
+            open_request = open_requests[0]
+            frappe.throw(
+                f"Attendance upload is missing requestId while Attendance Sync Request "
+                f"{open_request.name} is {open_request.status}. Use a request-aware sync client "
+                "or complete/reset the open request before using legacy sync."
+            )
+
         job = frappe.enqueue(
             _process_attendance_records,
             queue="long",
