@@ -1,7 +1,7 @@
 import frappe
 from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday as is_holiday_in_list
-from frappe.utils import get_datetime, get_time, getdate, now_datetime
+from frappe.utils import flt, get_datetime, get_time, getdate, now_datetime
 
 REQUEST_DOCTYPE = "Attendance Sync Request"
 REQUEST_EMPLOYEE_DOCTYPE = "Attendance Sync Employee"
@@ -312,13 +312,28 @@ def _create_or_update_attendance(record: dict, request_id: str | None = None) ->
         status = "updated"
 
     base_status = _derive_status(record, employee, shift_type)
+    attendance_indicators = _get_attendance_indicators(record)
 
     _set_if_field(attendance, "status", base_status)
     _set_if_field(attendance, "shift", shift_type)
-    _set_if_field(attendance, "in_time", _get_datetime_value(clock_in))
-    _set_if_field(attendance, "out_time", _get_datetime_value(clock_out))
-    _set_if_field(attendance, "late_entry_in_minutes", record.get("lateMinutes"))
-    _set_if_field(attendance, "early_exit_in_minutes", record.get("earlyMinutes"))
+    _set_if_field(attendance, "in_time", _get_datetime_value(clock_in), allow_empty=True)
+    _set_if_field(attendance, "out_time", _get_datetime_value(clock_out), allow_empty=True)
+    _set_if_field(attendance, "late_entry", attendance_indicators["late_entry"], allow_empty=True)
+    _set_if_field(attendance, "early_exit", attendance_indicators["early_exit"], allow_empty=True)
+    _set_if_field(
+        attendance,
+        "late_entry_in_minutes",
+        attendance_indicators["late_entry_in_minutes"],
+        allow_empty=True,
+    )
+    _set_if_field(
+        attendance,
+        "early_exit_in_minutes",
+        attendance_indicators["early_exit_in_minutes"],
+        allow_empty=True,
+    )
+    _set_if_field(attendance, "in_status", attendance_indicators["in_status"], allow_empty=True)
+    _set_if_field(attendance, "out_status", attendance_indicators["out_status"], allow_empty=True)
     _set_if_field(attendance, "exception", exception)
     _set_if_field(attendance, "overtime_in_minutes", _get_overtime_minutes(record))
     _set_if_field(attendance, "atsync_record_id", record_id)
@@ -329,10 +344,7 @@ def _create_or_update_attendance(record: dict, request_id: str | None = None) ->
             "attendance_date": attendance_date,
             "shift_type": shift_type,
             "base_status": base_status,
-            "late_entry": bool(record.get("lateMinutes")),
-            "early_exit": bool(record.get("earlyMinutes")),
-            "late_entry_in_minutes": record.get("lateMinutes") or 0,
-            "early_exit_in_minutes": record.get("earlyMinutes") or 0,
+            **attendance_indicators,
             "request_id": request_id,
             "record": record,
         }
@@ -592,11 +604,33 @@ def _update_request_counts(request_id: str) -> None:
     )
 
 
-def _set_if_field(doc, fieldname: str, value) -> None:
-    if value in (None, ""):
+def _set_if_field(doc, fieldname: str, value, allow_empty: bool = False) -> None:
+    if not allow_empty and value in (None, ""):
         return
     if doc.meta.has_field(fieldname):
         doc.set(fieldname, value)
+
+
+def _get_attendance_indicators(record: dict) -> dict:
+    """Return HRIS-compatible punch status and late/early indicators.
+
+    The sync client calculates the minute values from the device schedule. The
+    server owns the Attendance semantics: a missing punch is explicit, and a
+    late/early flag can only be true when its corresponding punch exists.
+    """
+    clock_in = record.get("clockIn")
+    clock_out = record.get("clockOut")
+    late_entry_in_minutes = max(flt(record.get("lateMinutes") or 0), 0)
+    early_exit_in_minutes = max(flt(record.get("earlyMinutes") or 0), 0)
+
+    return {
+        "in_status": "" if clock_in else "Missing",
+        "out_status": "" if clock_out else "Missing",
+        "late_entry": bool(clock_in and late_entry_in_minutes > 0),
+        "early_exit": bool(clock_out and early_exit_in_minutes > 0),
+        "late_entry_in_minutes": late_entry_in_minutes,
+        "early_exit_in_minutes": early_exit_in_minutes,
+    }
 
 
 def _get_datetime_value(value):
