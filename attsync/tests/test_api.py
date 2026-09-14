@@ -2,6 +2,7 @@ from unittest import TestCase
 
 from attsync.api import (
     _get_attendance_indicators,
+    _is_successful_record_result,
     _set_if_field,
     _should_protect_existing_attendance,
 )
@@ -61,6 +62,28 @@ class TestExistingAttendanceProtection(TestCase):
             _should_protect_existing_attendance(
                 "Present",
                 owned_by_attsync=False,
+            )
+        )
+
+
+class TestRecordResultClassification(TestCase):
+    def test_protected_attendance_is_a_successful_no_op(self):
+        self.assertTrue(
+            _is_successful_record_result(
+                {
+                    "status": "skipped",
+                    "reason": "Existing attendance status is protected: On Leave",
+                }
+            )
+        )
+
+    def test_unexpected_skip_remains_a_failure(self):
+        self.assertFalse(
+            _is_successful_record_result(
+                {
+                    "status": "skipped",
+                    "reason": "Employee not found",
+                }
             )
         )
 
