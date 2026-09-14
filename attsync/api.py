@@ -510,7 +510,14 @@ def _record_batch_failure(request_id: str, batch_id: str, employee_numbers: list
 def _is_successful_record_result(result: dict) -> bool:
     if result.get("status") in {"created", "updated"}:
         return True
-    return result.get("status") == "skipped" and result.get("reason") == "Holiday with no check-in/out"
+    if result.get("status") != "skipped":
+        return False
+
+    reason = result.get("reason") or ""
+    return (
+        reason == "Holiday with no check-in/out"
+        or reason.startswith("Existing attendance status is protected:")
+    )
 
 
 def _get_request_employee_row_name(request_id: str, employee_number: str) -> str | None:
