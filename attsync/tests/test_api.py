@@ -1,6 +1,10 @@
 from unittest import TestCase
 
-from attsync.api import _get_attendance_indicators, _set_if_field
+from attsync.api import (
+    _get_attendance_indicators,
+    _set_if_field,
+    _should_protect_existing_attendance,
+)
 
 
 class _Meta:
@@ -16,6 +20,49 @@ class _Document:
 
     def set(self, fieldname, value):
         self.values[fieldname] = value
+
+
+class TestExistingAttendanceProtection(TestCase):
+    def test_on_leave_is_protected_even_when_owned_by_attsync(self):
+        self.assertTrue(
+            _should_protect_existing_attendance(
+                "On Leave",
+                owned_by_attsync=True,
+            )
+        )
+
+    def test_leave_half_day_is_protected_even_when_owned_by_attsync(self):
+        self.assertTrue(
+            _should_protect_existing_attendance(
+                "Half Day",
+                owned_by_attsync=True,
+                leave_application="HR-LAP-0001",
+            )
+        )
+
+    def test_absent_can_still_be_updated(self):
+        self.assertFalse(
+            _should_protect_existing_attendance(
+                "Absent",
+                owned_by_attsync=False,
+            )
+        )
+
+    def test_owned_present_record_can_still_be_refreshed(self):
+        self.assertFalse(
+            _should_protect_existing_attendance(
+                "Present",
+                owned_by_attsync=True,
+            )
+        )
+
+    def test_unowned_present_record_remains_protected(self):
+        self.assertTrue(
+            _should_protect_existing_attendance(
+                "Present",
+                owned_by_attsync=False,
+            )
+        )
 
 
 class TestAttendanceIndicators(TestCase):
