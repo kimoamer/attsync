@@ -299,7 +299,11 @@ def _create_or_update_attendance(record: dict, request_id: str | None = None) ->
             existing_record_id = attendance.get("atsync_record_id")
 
         owned_by_attsync = bool(record_id and existing_record_id and existing_record_id == record_id)
-        if existing_status != "Absent" and not owned_by_attsync:
+        if _should_protect_existing_attendance(
+            existing_status,
+            owned_by_attsync,
+            attendance.get("leave_application"),
+        ):
             return {
                 "status": "skipped",
                 "reason": f"Existing attendance status is protected: {existing_status or 'Unknown'}",
@@ -602,6 +606,19 @@ def _update_request_counts(request_id: str) -> None:
         },
         update_modified=False,
     )
+
+
+def _should_protect_existing_attendance(
+    existing_status: str,
+    owned_by_attsync: bool,
+    leave_application: str | None = None,
+) -> bool:
+    """Keep HR-controlled leave states authoritative over device sync data."""
+    if existing_status == "On Leave":
+        return True
+    if existing_status == "Half Day" and leave_application:
+        return True
+    return existing_status != "Absent" and not owned_by_attsync
 
 
 def _set_if_field(doc, fieldname: str, value, allow_empty: bool = False) -> None:
