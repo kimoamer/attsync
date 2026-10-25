@@ -50,6 +50,11 @@ def sync_attendance_records(data: dict | str | None = None) -> dict:
     payload = _get_payload(data)
     request_id = payload.get("requestId") or payload.get("request_id")
 
+    if payload.get("statusOnly"):
+        if not request_id:
+            frappe.throw("requestId is required for a status check")
+        return _get_sync_request_status(request_id)
+
     if payload.get("finalize"):
         return _finalize_sync_request(payload, request_id)
 
@@ -85,11 +90,17 @@ def sync_attendance_records(data: dict | str | None = None) -> dict:
             "jobId": getattr(job, "id", None) or getattr(job, "get_id", lambda: None)(),
         }
 
-    _validate_request_for_upload(request_id)
     batch_id = payload.get("batchId")
     if not batch_id:
         frappe.throw("batchId is required when requestId is supplied")
 
+    # Serialize batch registration for this request. Saving the parent document
+    # rewrites all child rows and can silently undo another worker's progress.
+    frappe.db.sql(
+        f"SELECT name FROM `tab{REQUEST_DOCTYPE}` WHERE name = %s FOR UPDATE",
+        (request_id,),
+    )
+    _validate_request_for_upload(request_id)
     existing_batch = frappe.db.get_value(
         REQUEST_BATCH_DOCTYPE,
         {"parent": request_id, "parenttype": REQUEST_DOCTYPE, "batch_id": batch_id},
@@ -105,19 +116,30 @@ def sync_attendance_records(data: dict | str | None = None) -> dict:
             "duplicate": True,
         }
 
-    request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
-    request_doc.status = "In Progress"
-    request_doc.last_sync_attempt = now_datetime()
-    batch_row = request_doc.append(
-        "batches",
+    next_idx = frappe.db.sql(
+        f"SELECT COALESCE(MAX(idx), 0) + 1 FROM `tab{REQUEST_BATCH_DOCTYPE}` "
+        "WHERE parent = %s AND parenttype = %s AND parentfield = 'batches'",
+        (request_id, REQUEST_DOCTYPE),
+    )[0][0]
+    batch_row = frappe.get_doc(
         {
+            "doctype": REQUEST_BATCH_DOCTYPE,
+            "parent": request_id,
+            "parenttype": REQUEST_DOCTYPE,
+            "parentfield": "batches",
+            "idx": next_idx,
             "batch_id": batch_id,
             "status": "Queued",
             "records_received": len(records),
-        },
+        }
     )
-    request_doc.flags.ignore_permissions = True
-    request_doc.save()
+    batch_row.db_insert()
+    frappe.db.set_value(
+        REQUEST_DOCTYPE,
+        request_id,
+        {"status": "In Progress", "last_sync_attempt": now_datetime()},
+        update_modified=False,
+    )
 
     job = frappe.enqueue(
         _process_attendance_records,
@@ -192,40 +214,74 @@ def _finalize_sync_request(payload: dict, request_id: str | None) -> dict:
 
     request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
 
+    if request_doc.status in {"Completed", "Partial", "Failed"}:
+        return {"requestId": request_id, "finalized": True, "status": request_doc.status}
+
     if payload.get("dryRun"):
         if request_doc.batches:
             frappe.throw("Cannot reset a dry-run request after attendance batches have been queued")
-        request_doc.status = "Ready"
-        request_doc.claimed_at = None
-        request_doc.last_sync_attempt = now_datetime()
-        request_doc.finalize_received = 0
-        request_doc.expected_batches = 0
-        request_doc.last_error = None
-        request_doc.flags.ignore_permissions = True
-        request_doc.save()
-        return {"requestId": request_id, "finalized": True, "status": request_doc.status, "dryRun": True}
-
-    request_doc.finalize_received = 1
-    request_doc.expected_batches = int(payload.get("expectedBatches") or 0)
-    request_doc.last_sync_attempt = now_datetime()
-
-    failed_numbers = {
-        str(value)
-        for value in (payload.get("failedEmployees") or [])
-        if value not in (None, "")
-    }
-    for employee_number in failed_numbers:
-        _mark_request_employee_failed(
+        frappe.db.set_value(
+            REQUEST_DOCTYPE,
             request_id,
-            employee_number,
+            {
+                "status": "Ready", "claimed_at": None, "last_sync_attempt": now_datetime(),
+                "finalize_received": 0, "expected_batches": 0, "last_error": None,
+            },
+            update_modified=False,
+        )
+        return {"requestId": request_id, "finalized": True, "status": "Ready", "dryRun": True}
+
+    expected_batches = int(payload.get("expectedBatches") or 0)
+    if expected_batches < 0 or expected_batches < len(request_doc.batches):
+        frappe.throw("expectedBatches cannot be smaller than the number of received batches")
+
+    # Direct DB updates avoid replacing in-flight batch and employee child rows.
+    frappe.db.set_value(
+        REQUEST_DOCTYPE,
+        request_id,
+        {
+            "finalize_received": 1,
+            "expected_batches": expected_batches,
+            "last_sync_attempt": now_datetime(),
+        },
+        update_modified=False,
+    )
+    for employee_number in {
+        str(value) for value in (payload.get("failedEmployees") or [])
+        if value not in (None, "")
+    }:
+        _mark_request_employee_failed(
+            request_id, employee_number,
             "Attendance query or upload failed on the sync client.",
         )
 
-    request_doc.flags.ignore_permissions = True
-    request_doc.save()
     status = _refresh_request_status(request_id)
     return {"requestId": request_id, "finalized": True, "status": status}
 
+
+
+def _get_sync_request_status(request_id: str) -> dict:
+    """Report server-side processing, not merely HTTP acceptance of a queued batch."""
+    if not frappe.db.exists(REQUEST_DOCTYPE, request_id):
+        frappe.throw(f"Attendance Sync Request {request_id} does not exist")
+
+    request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+    if request_doc.finalize_received and request_doc.status == "In Progress":
+        _refresh_request_status(request_id)
+        request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+
+    batches = list(request_doc.batches or [])
+    return {
+        "requestId": request_id,
+        "status": request_doc.status,
+        "expectedBatches": int(request_doc.expected_batches or 0),
+        "receivedBatches": len(batches),
+        "pendingBatches": sum(row.status in {"Queued", "Processing"} for row in batches),
+        "failedBatches": sum(row.status in {"Failed", "Partial"} for row in batches),
+        "recordsSynced": sum(int(row.records_synced or 0) for row in batches),
+        "recordsFailed": sum(int(row.records_failed or 0) for row in batches),
+        "lastError": request_doc.last_error,
+    }
 
 def _get_payload(data: dict | str | None) -> dict:
     if data:
@@ -263,9 +319,12 @@ def _create_or_update_attendance(record: dict, request_id: str | None = None) ->
             "recordId": record_id,
         }
 
-    existing_attendance = frappe.db.exists(
+    # Cancelled Attendance rows are historical documents, never edit targets.
+    # ERPNext allows a replacement Attendance for the same day after cancellation.
+    existing_attendance = frappe.db.get_value(
         "Attendance",
-        {"employee": employee, "attendance_date": attendance_date},
+        {"employee": employee, "attendance_date": attendance_date, "docstatus": ["!=", 2]},
+        "name",
     )
 
     shift_type = _get_shift_type(record)
@@ -400,7 +459,22 @@ def _process_attendance_records(payload: dict) -> dict:
     results = []
     try:
         for record in records:
-            results.append(_create_or_update_attendance(record, request_id=request_id))
+            # A cancelled document or invalid record must not roll back the
+            # successful attendance changes for the other 499 records.
+            frappe.db.savepoint("atsync_record")
+            try:
+                results.append(_create_or_update_attendance(record, request_id=request_id))
+            except Exception as exc:
+                frappe.db.rollback(save_point="atsync_record")
+                safe_record = record if isinstance(record, dict) else {}
+                results.append(
+                    {
+                        "status": "failed",
+                        "reason": str(exc)[:1000],
+                        "employeeNo": safe_record.get("employeeNo"),
+                        "recordId": safe_record.get("recordId"),
+                    }
+                )
 
         if request_id and batch_id:
             _record_batch_success(request_id, batch_id, records, results)
@@ -441,18 +515,22 @@ def _record_batch_success(request_id: str, batch_id: str, records: list, results
     per_employee: dict[str, dict[str, int | str]] = {}
 
     for record, result in zip(records, results, strict=False):
-        employee_number = str(record.get("employeeNo") or "")
+        applied = _is_successful_record_result(result)
+        if applied:
+            synced_count += 1
+        else:
+            failed_count += 1
+
+        employee_number = str(record.get("employeeNo") or "") if isinstance(record, dict) else ""
         if not employee_number:
             continue
 
         bucket = per_employee.setdefault(employee_number, {"found": 0, "synced": 0, "failed": 0, "error": ""})
         bucket["found"] += 1
-        if _is_successful_record_result(result):
+        if applied:
             bucket["synced"] += 1
-            synced_count += 1
         else:
             bucket["failed"] += 1
-            failed_count += 1
             bucket["error"] = result.get("reason") or "Attendance record was not applied."
 
     for employee_number, counts in per_employee.items():
@@ -478,10 +556,13 @@ def _record_batch_success(request_id: str, batch_id: str, records: list, results
         REQUEST_BATCH_DOCTYPE,
         batch_name,
         {
-            "status": "Completed" if failed_count == 0 else "Failed",
+            "status": "Completed" if not failed_count else ("Partial" if synced_count else "Failed"),
             "records_synced": synced_count,
             "records_failed": failed_count,
-            "error_message": None if failed_count == 0 else "One or more attendance records were not applied.",
+            "error_message": None if not failed_count else next(
+                (result.get("reason", "")[:1000] for result in results if not _is_successful_record_result(result)),
+                "One or more attendance records were not applied.",
+            ),
         },
         update_modified=False,
     )
@@ -548,6 +629,8 @@ def _mark_request_employee_failed(request_id: str, employee_number: str, error: 
 
 def _refresh_request_status(request_id: str) -> str:
     request_doc = frappe.get_doc(REQUEST_DOCTYPE, request_id)
+    if request_doc.status in {"Completed", "Partial", "Failed"}:
+        return request_doc.status
     selected_rows = [row for row in request_doc.employees if row.include_in_sync]
     batch_rows = list(request_doc.batches or [])
 
@@ -573,10 +656,14 @@ def _refresh_request_status(request_id: str) -> str:
                     update_modified=False,
                 )
 
+            failed_batches = [row for row in batch_rows if row.status in {"Failed", "Partial"}]
             if failed_rows and len(failed_rows) == len(selected_rows):
                 status = "Failed"
             elif failed_rows:
                 status = "Partial"
+            elif failed_batches:
+                # Even an unassigned/malformed record failure is not success.
+                status = "Partial" if any(row.records_synced for row in batch_rows) else "Failed"
             else:
                 status = "Completed"
 
