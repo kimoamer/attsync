@@ -7,5 +7,7 @@ frappe.query_reports["Attendance Calculation Exceptions"] = {
     {"fieldname":"employee","label":"Employee","fieldtype":"Link","options":"Employee"},
     {"fieldname": "include_unrecorded", "label": "Include Days Without Records", "fieldtype": "Check", "default": 0},
     {"fieldname": "exception_view", "label": "Exception Type", "fieldtype": "Select", "options": "All Exceptions\nClock In/Out Exceptions\nShift Exceptions\nMisc Exceptions", "default": "All Exceptions"},
+    {"fieldname": "audit_gaps", "label": "Audit Unrecorded Days", "fieldtype": "Check", "default": 0},
+    {"fieldname": "exception_view", "label": "Exception Type", "fieldtype": "Select", "options": "All Exceptions\nClock In/Out Exceptions\nShift Exceptions\nMisc Exceptions", "default": All Exceptions},
   ]
 };

@@ -11,6 +11,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_datetime, getdate, today
 
+from attsync.attendance_review import review_attendance
+
 MAX_DAYS = 366
 MAX_EMPLOYEES = 1000
 MAX_GAP_DAYS = 62
@@ -42,7 +44,7 @@ def _date_range(filters):
     days = (end - start).days + 1
     if days <= 0 or days > MAX_DAYS:
         frappe.throw(_("Choose a valid date range of at most 366 days"))
-    if cint(filters.get("include_unrecorded")) and days > MAX_GAP_DAYS:
+    if (cint(filters.get("include_unrecorded")) or cint(filters.get("audit_gaps"))) and days > MAX_GAP_DAYS:
         frappe.throw(_("To include days with no attendance records, use a range of at most 62 days"))
     if not frappe.has_permission("Attendance", "read") or not frappe.has_permission("Employee", "read"):
         frappe.throw(_("You do not have permission to view employee attendance"), frappe.PermissionError)
@@ -61,7 +63,7 @@ def _employees(filters):
     )
     if len(rows) > MAX_EMPLOYEES:
         frappe.throw(_("More than 1000 employees matched. Select a department or employee."))
-    if cint(filters.get("include_unrecorded")) and len(rows) > MAX_GAP_EMPLOYEES:
+    if (cint(filters.get("include_unrecorded")) or cint(filters.get("audit_gaps"))) and len(rows) > MAX_GAP_EMPLOYEES:
         frappe.throw(_("To include unrecorded days, select at most 200 employees."))
     return rows
 
@@ -202,6 +204,9 @@ def get_rows(filters):
     leaves, leave_types = _leave_info(records)
 
     include_unrecorded = cint(filters.get("include_unrecorded"))
+    # Exception analysis must include date gaps; never infer an Absent document.
+    if filters.get("audit_gaps"):
+        include_unrecorded = 1
     current_date = getdate(today())
     result = []
     for emp in employees:
@@ -240,12 +245,18 @@ def get_rows(filters):
             if att and not overtime:
                 overtime = flt(att.get("before_shift_in_minutes")) + flt(att.get("after_shift_in_minutes"))
             is_holiday = bool((att and cint(att.get("is_holiday"))) or is_listed_holiday)
+            quality = review_attendance(
+                att,
+                calendar_holiday=is_holiday,
+                weekly_off=is_weekend,
+                current_day=(day >= current_date),
+            )
             notes = []
             if status == "Absent":
                 notes.append(_("Absent"))
-            if missing_in:
+            if quality["missing_in"]:
                 notes.append(_("Missing clock-in"))
-            if missing_out:
+            if quality["missing_out"]:
                 notes.append(_("Missing clock-out"))
             if late > 0 or (att and cint(att.get("late_entry"))):
                 notes.append(_("Late arrival"))
@@ -254,6 +265,7 @@ def get_rows(filters):
             exception = att.get("exception") if att else ""
             if exception:
                 notes.append(str(exception))
+            notes.extend(quality["review_notes"])
             result.append({
                 "employee": emp.name,
                 "employee_name": emp.get("employee_name") or emp.name,
@@ -267,13 +279,22 @@ def get_rows(filters):
                 "clock_in": _punch_string(att.get("in_time")) if att else "",
                 "clock_out": _punch_string(att.get("out_time")) if att else "",
                 "working_hours": flt(att.get("working_hours")) if att else 0,
+                "gross_presence_hours": quality["gross_presence_hours"],
+                "punch_case": quality["punch_case"],
+                "no_punch_day": quality["no_punch_day"],
+                "unverified_half_day": quality["unverified_half_day"],
+                "unrecorded_review_day": quality["unrecorded_review_day"],
+                "working_hours_issue": quality["working_hours_issue"],
+                "source_flag_issue": quality["source_flag_issue"],
+                "status_punch_conflict": quality["status_punch_conflict"],
+                "needs_review": quality["needs_review"],
                 "late_minutes": late,
                 "early_minutes": early,
                 "late_entry": int(bool(att and (cint(att.get("late_entry")) or late > 0))),
                 "early_exit": int(bool(att and (cint(att.get("early_exit")) or early > 0))),
                 "overtime_minutes": max(0, overtime),
-                "missing_in": int(missing_in),
-                "missing_out": int(missing_out),
+                "missing_in": quality["missing_in"],
+                "missing_out": quality["missing_out"],
                 "absent": int(status == "Absent"),
                 "weekend": int(is_weekend),
                 "holiday": int(is_holiday),
@@ -308,7 +329,16 @@ def detailed_columns():
         _col("clock_in", "الحضور", width=85),
         _col("clock_out", "الانصراف", width=85),
         _col("status", "الحالة", width=110),
-        _col("working_hours", "ساعات العمل", "Float", 100),
+        _col("working_hours", "ساعات العمل المسجلة", "Float", 145),
+        _col("gross_presence_hours", "المدة بين البصمتين (ليست ساعات مستحقة)", "Float", 220),
+        _col("punch_case", "تصنيف البصمات", width=235),
+        _col("no_punch_day", "حضور بدون بصمات", "Check", 145),
+        _col("unverified_half_day", "نصف يوم يحتاج مراجعة", "Check", 175),
+        _col("unrecorded_review_day", "بدون سجل - للمراجعة", "Check", 165),
+        _col("working_hours_issue", "مشكلة ساعات العمل", "Check", 145),
+        _col("source_flag_issue", "تعارض علامات البصمة", "Check", 150),
+        _col("status_punch_conflict", "تعارض الحالة مع البصمات", "Check", 175),
+        _col("needs_review", "يحتاج مراجعة", "Check", 120),
         _col("late_minutes", "دقائق التأخير", "Float", 105),
         _col("early_minutes", "دقائق الانصراف المبكر", "Float", 145),
         _col("overtime_minutes", "دقائق الإضافي", "Float", 115),
@@ -325,17 +355,17 @@ def detailed_columns():
 
 def filter_by_view(rows, view):
     if view in ("Clock In/Out Exceptions", "Clock"):
-        return [r for r in rows if r["missing_in"] or r["missing_out"]]
+        return [r for r in rows if r["missing_in"] or r["missing_out"] or r["no_punch_day"] or r["unverified_half_day"] or r["source_flag_issue"]]
     if view in ("Shift Exceptions", "Shift"):
-        return [r for r in rows if r["late_entry"] or r["early_exit"]]
+        return [r for r in rows if r["late_entry"] or r["early_exit"] or r["status_punch_conflict"]]
     if view in ("Misc Exceptions", "Other"):
-        return [r for r in rows if r["absent"] or r["status"] in (
+        return [r for r in rows if r["unrecorded_review_day"] or r["working_hours_issue"] or r["absent"] or r["status"] in (
             "On Leave", "Half Day", "Business Trip", "Time Off", "No Record"
         ) or (r["exception"] and not (
             r["missing_in"] or r["missing_out"] or r["late_entry"] or r["early_exit"]
         ))]
     if view in ("All Exceptions", "All"):
-        return [r for r in rows if r["exception"] or r["status"] in (
+        return [r for r in rows if r["needs_review"] or r["exception"] or r["status"] in (
             "On Leave", "Half Day", "Business Trip", "Time Off", "No Record"
         )]
     return rows
@@ -376,6 +406,10 @@ def summarize(rows, employees):
             "late_minutes": 0.0, "early_minutes": 0.0,
             "working_hours": 0.0, "overtime_minutes": 0.0,
             "unrecorded_days": 0, "holidays": 0,
+            "gross_presence_hours": 0.0, "review_cases": 0,
+            "no_punch_days": 0, "half_day_reviews": 0,
+            "working_hours_issues": 0, "source_flag_issues": 0,
+            "status_punch_conflicts": 0,
         }
         for e in employees
     }
@@ -388,6 +422,13 @@ def summarize(rows, employees):
         item["late_minutes"] += r["late_minutes"]
         item["early_minutes"] += r["early_minutes"]
         item["working_hours"] += r["working_hours"]
+        item["gross_presence_hours"] += r["gross_presence_hours"]
+        item["review_cases"] += r["needs_review"]
+        item["no_punch_days"] += r["no_punch_day"]
+        item["half_day_reviews"] += r["unverified_half_day"]
+        item["working_hours_issues"] += r["working_hours_issue"]
+        item["source_flag_issues"] += r["source_flag_issue"]
+        item["status_punch_conflicts"] += r["status_punch_conflict"]
         item["overtime_minutes"] += r["overtime_minutes"]
         if r["status"] == "No Record":
             item["unrecorded_days"] += 1
@@ -422,7 +463,14 @@ def calculated_columns():
         _col("missing_punches", "بصمات ناقصة", "Int", 110),
         _col("late_minutes", "دقائق التأخير", "Float", 110),
         _col("early_minutes", "دقائق الانصراف المبكر", "Float", 155),
-        _col("working_hours", "ساعات العمل", "Float", 110),
+        _col("working_hours", "ساعات العمل المسجلة", "Float", 150),
+        _col("gross_presence_hours", "مدة التواجد بين البصمتين", "Float", 190),
+        _col("review_cases", "أيام تحتاج مراجعة", "Int", 150),
+        _col("no_punch_days", "حضور بدون بصمات", "Int", 145),
+        _col("half_day_reviews", "نصف يوم بدون بصمات", "Int", 150),
+        _col("working_hours_issues", "خلل ساعات العمل", "Int", 135),
+        _col("source_flag_issues", "تعارض علامات البصمات", "Int", 165),
+        _col("status_punch_conflicts", "تعارض الحالة والبصمة", "Int", 170),
         _col("overtime_minutes", "دقائق الإضافي", "Float", 120),
         _col("holidays", "العطلات المسجلة", "Int", 125),
         _col("unrecorded_days", "أيام بدون سجل (عند تفعيل الخيار)", "Int", 215),
