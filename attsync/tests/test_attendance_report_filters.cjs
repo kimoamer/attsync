@@ -24,6 +24,8 @@ for (const [reportName, slug] of reports) {
     vm.runInNewContext(source, { frappe }, { filename });
     const config = frappe.query_reports[reportName];
     assert.ok(config && Array.isArray(config.filters), "Report filters must register");
+    const names = config.filters.map((filter) => filter.fieldname);
+    assert.equal(new Set(names).size, names.length, "Duplicate report filter fieldnames");
     const getFilter = (fieldname) => config.filters.find((f) => f.fieldname === fieldname);
     for (const name of ["company", "from_date", "to_date"]) {
       const filter = getFilter(name);
@@ -34,6 +36,7 @@ for (const [reportName, slug] of reports) {
     if (slug === "attendance_calculation_exceptions") {
       const view = getFilter("exception_view");
       assert.equal(view.default, "All Exceptions");
+      assert.equal(config.filters.filter((filter) => filter.fieldname === "audit_gaps").length, 1);
       assert.ok(view.options.split("\n").includes(view.default));
     }
   });
